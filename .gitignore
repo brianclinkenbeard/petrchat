@@ -3,5 +3,6 @@ final-project.mp4
 
 # build files
 compile_commands.json
+.clangd
 lib
 bin
