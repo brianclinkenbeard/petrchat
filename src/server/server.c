@@ -2,6 +2,7 @@
 #include "protocol.h"
 #include <pthread.h>
 #include <signal.h>
+#include <unistd.h>
 
 const char exit_str[] = "exit";
 
@@ -10,6 +11,14 @@ pthread_mutex_t buffer_lock;
 
 int total_num_msg = 0;
 int listen_fd;
+
+struct user_node {
+    char name[64];
+    int user_fd;
+    struct user_node *next;
+};
+
+struct user_node *head = NULL;
 
 void sigint_handler(int sig) {
     printf("shutting down server\n");
@@ -61,6 +70,7 @@ int server_init(int server_port) {
 
 //Function running in thread
 void *process_client(void *clientfd_ptr) {
+    printf("Processing client\n");
     int client_fd = *(int *)clientfd_ptr;
     free(clientfd_ptr);
     int received_size;
@@ -78,35 +88,53 @@ void *process_client(void *clientfd_ptr) {
 
         pthread_mutex_lock(&buffer_lock);
 
-        bzero(buffer, BUFFER_SIZE);
-        received_size = read(client_fd, buffer, sizeof(buffer));
-        if (received_size < 0) {
-            printf("Receiving failed\n");
+        petr_header b;
+        petr_header r;
+        rd_msgheader(client_fd, &b);
+        if (b.msg_len < 0) {
+            printf("Error reading message\n");
             break;
-        } else if (received_size == 0) {
-            continue;
         }
 
-        if (strncmp(exit_str, buffer, sizeof(exit_str)) == 0) {
-            printf("Client exit\n");
+        bzero(buffer, BUFFER_SIZE);
+        received_size = read(client_fd, buffer, b.msg_len);
+        if (received_size < 0 || received_size != b.msg_len) {
+            printf("Invalid size\n");
             break;
         }
+
+        switch (b.msg_type) {
+        case LOGIN:
+            printf("Login requested for user %s\n", buffer);
+            r.msg_len = 0;
+            r.msg_type = OK;
+            break;
+        case LOGOUT:
+            // TODO: print username
+            printf("Logout requested\n");
+            r.msg_len = 0;
+            r.msg_type = OK;
+            break;
+        default:
+            printf("WATAFAK!!!!!!\n");
+            r.msg_len = 0;
+            r.msg_type = ESERV;
+        }
+
         total_num_msg++;
         // print buffer which contains the client contents
         printf("Receive message from client: %s\n", buffer);
         printf("Total number of received messages: %d\n", total_num_msg);
 
-        sleep(1); //mimic a time comsuming process
-
-        // and send that buffer to client
-        int ret = write(client_fd, buffer, received_size);
+        // send response to client
+        int ret = wr_msg(client_fd, &r, buffer);
         pthread_mutex_unlock(&buffer_lock);
 
         if (ret < 0) {
             printf("Sending failed\n");
             break;
         }
-        printf("Send the message back to client: %s\n", buffer);
+        printf("Send response to client: %s\n", buffer);
     }
     // Close the socket at the end
     printf("Close current client connection\n");
@@ -121,6 +149,9 @@ void run_server(int server_port) {
     int client_addr_len = sizeof(client_addr);
 
     pthread_t tid;
+
+    if (signal(SIGINT, sigint_handler) == SIG_ERR)
+        printf("signal handler processing error\n");
 
     while (1) {
         // Wait and Accept the connection from client
