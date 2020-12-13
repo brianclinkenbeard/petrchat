@@ -3,6 +3,10 @@ final-project.mp4
 
 # build files
 compile_commands.json
+.cache
 .clangd
 lib
 bin
+
+# submission file
+53finalproj_65.tar

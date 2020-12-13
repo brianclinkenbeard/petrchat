@@ -23,3 +23,7 @@ chat: setup $(DEPS)
 
 clean:
 	rm -rf bin 
+
+tar:
+	rm -f 53finalproj_65.tar
+	tar cf 53finalproj_65.tar -C ~ 53finalproj/include 53finalproj/lib 53finalproj/src
