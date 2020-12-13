@@ -93,17 +93,17 @@ void *process_client(void *clientfd_ptr) {
         pthread_mutex_lock(&buffer_lock);
 
         if (DEBUG_OUT)
-            printf("current thread: %lu\n", pthread_self());
+            printf("Thread ID: %lu\n", pthread_self());
 
-        petr_header r;
-        petr_header s;
-
+        // read header
+        petr_header r, s;
         rd_msgheader(client_fd, &r);
         if (r.msg_len < 0) {
             printf("Error reading message\n");
             break;
         }
-
+        
+        // read buffer
         bzero(buffer, BUFFER_SIZE);
         received_size = read(client_fd, buffer, r.msg_len);
         if (received_size < 0 || received_size != r.msg_len) {
@@ -111,58 +111,23 @@ void *process_client(void *clientfd_ptr) {
             break;
         }
 
-        // TODO: restructure. login should open client thread,
-        // then read messages to create jobs
-
+        // TODO: restructure. create jobs based on headers
         switch (r.msg_type) {
-        case LOGIN:
-        {
-            printf("Login requested for user %s\n", buffer);
-
-            struct node *c;
-            int found = 0;
-            for (c = users.head; c != NULL; c = c->next) {
-                if (strcmp(buffer, c->username) == 0) { // TODO: safety?
-                    found = 1;
-                    break;
-                }
-            }
-
-            if (found) {
-                s.msg_type = EUSREXISTS;
-            } else {
-                // create new user
-                if (DEBUG_OUT)
-                    printf("Creating new user with name %s (length %d)\n", buffer, r.msg_len);
-
-                insertFront(&users, buffer, client_fd);
-               
-                s.msg_type = OK;
-            }
-            s.msg_len = 0;
-            break;
-        }
         case LOGOUT:
         {
-            if (DEBUG_OUT) {
-                printf("Logout requested for FD %d...\n", client_fd);
-                //printList(&users);
-            }
-
             int ui = getIndexByFD(&users, client_fd);
+            node_t *c = getNode(&users, ui);
+            printf("Logging out user %s\n", c->username);
             if (ui >= 0) {
-                if (DEBUG_OUT) {
-                    node_t *c = getNode(&users, ui);
-                    printf("Removing user %s (FD: %d)...\n", c->username, c->user_fd);
-                }
-                removeByIndex(&users, ui);
-                s.msg_len = 0;
+                removeByIndex(&users, ui); // remove user
+
                 s.msg_type = OK;
              } else {
                 printf("Error: user not found to logout!");
-                s.msg_len = 0;
+
                 s.msg_type = ESERV;
             }
+            s.msg_len = 0;
             break;
         }
         default:
@@ -170,11 +135,12 @@ void *process_client(void *clientfd_ptr) {
             s.msg_len = 0;
             s.msg_type = ESERV;
         }
-
+        /*
         total_num_msg++;
         // print buffer which contains the client contents
         printf("Receive message from client: %s\n", buffer);
         printf("Total number of received messages: %d\n", total_num_msg);
+        */
 
         // send response to client
         int ret = wr_msg(client_fd, &s, buffer);
@@ -184,14 +150,14 @@ void *process_client(void *clientfd_ptr) {
             printf("Sending failed\n");
             break;
         }
-        printf("Send response to client: %s\n", buffer);
+        //printf("Send response to client: %s\n", buffer);
 
         // close connection when user logs out or tries to login as an existing user
-        if (r.msg_type == LOGOUT || s.msg_type == EUSREXISTS) 
+        if (r.msg_type == LOGOUT)
             break;
     }
     // Close the socket at the end
-    printf("Closing current client connection\n");
+    printf("Closing client (FD: %d)\n", client_fd);
     close(client_fd);
     return NULL;
 }
@@ -209,15 +175,47 @@ void run_server(int server_port) {
 
     while (1) {
         // Wait and Accept the connection from client
-        printf("Wait for new client connection\n");
+        //printf("Wait for new client connection\n");
         int *client_fd = malloc(sizeof(int));
         *client_fd = accept(listen_fd, (SA *)&client_addr, (socklen_t*)&client_addr_len);
         if (*client_fd < 0) {
             printf("server acccept failed\n");
             exit(EXIT_FAILURE);
         } else {
-            printf("Client connetion accepted\n");
-            pthread_create(&tid, NULL, process_client, (void *)client_fd);
+            printf("Client connetion accepted (FD %d)\n", *client_fd);
+
+            petr_header login, r;
+            r.msg_len = 0;
+
+            rd_msgheader(*client_fd, &login);
+            if (login.msg_len < 0) {
+                printf("Error reading message, closing connection\n");
+                close(*client_fd);
+            }
+
+            char name[32];
+            read(*client_fd, name, login.msg_len); // TODO: no users above 32 chars
+            if (nameExists(&users, name)) {
+                printf("Invalid login for username %s: user exists\n", name);
+
+                // respond with error
+                r.msg_type = EUSREXISTS;
+                wr_msg(*client_fd, &r, "");
+
+                printf("Closing client (FD %d)", *client_fd);
+                close(*client_fd);
+            } else {
+                printf("Login accepted for user %s\n", name);
+
+                addUser(&users, name, *client_fd); // add user to userlist
+
+                // reply OK
+                r.msg_type = OK;
+                wr_msg(*client_fd, &r, "");
+
+                // create client thread
+                pthread_create(&tid, NULL, process_client, (void *)client_fd);
+            }
         }
     }
     bzero(buffer, BUFFER_SIZE);
@@ -258,8 +256,8 @@ int main(int argc, char *argv[]) {
         strcpy(audit_log, argv[optind+1]); // TODO: safety
     }
 
-    printf("received arguments\njob threads: %d | port: %d | audit log: %s\n", 
-            jthreads, port, audit_log);
+    if (DEBUG_OUT)
+        printf("Job threads: %d | Port: %d | Audit log: %s\n", jthreads, port, audit_log);
 
     run_server(port);
 

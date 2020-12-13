@@ -41,8 +41,8 @@ typedef struct userlist {
  * @param list pointer to the linkedList struct
  * @param valref pointer to the data to insert into the linkedList
  */
-void insertRear(List_t* list, char* un, int fd);
 void insertFront(List_t* list, char* un, int fd);
+void addUser(List_t* list, char* un, int fd);
 
 /*
  * Each of these functions removes a single linkedList node from
@@ -71,5 +71,7 @@ void printList(List_t* list);
 int getIndexByFD(List_t* list, int fd);
 
 node_t* getNode(List_t* list, int index);
+
+int nameExists(List_t* list, char* name);
 
 #endif

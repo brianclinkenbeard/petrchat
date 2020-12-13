@@ -38,7 +38,7 @@ void insertFront(List_t* list, char* un, int fd) {
     list->length++; 
 }
 
-void insertRear(List_t* list, char* un, int fd) {
+void addUser(List_t* list, char* un, int fd) {
     if (list->length == 0) {
         insertFront(list, un, fd);
         return;
@@ -169,4 +169,16 @@ node_t* getNode(List_t* list, int index)
     }
 
     return c;
+}
+
+int nameExists(List_t *list, char *name)
+{
+    int exists = 0;
+    for (node_t *c = list->head; c != NULL; c = c->next) {
+        if (strcmp(c->username, name) == 0) {
+            exists = 1;
+            break;
+        }
+    }
+    return exists;
 }
