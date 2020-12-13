@@ -191,10 +191,15 @@ void run_server(int server_port) {
             if (login.msg_len < 0) {
                 printf("Error reading message, closing connection\n");
                 close(*client_fd);
+                continue;
+            } else if (login.msg_len > STR_MAX) {
+                printf("Username too long, closing connection\n");
+                close(*client_fd);
+                continue;
             }
 
             char name[32];
-            read(*client_fd, name, login.msg_len); // TODO: no users above 32 chars
+            read(*client_fd, name, login.msg_len);
             if (nameExists(&users, name)) {
                 printf("Invalid login for username %s: user exists\n", name);
 
