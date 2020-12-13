@@ -1,8 +1,16 @@
+// GROUP 65
+// Member: Brian Clinkenbeard
+
 #include "server.h"
 #include "protocol.h"
+#include <bits/getopt_core.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
+#include "linkedList.h"
 
 const char exit_str[] = "exit";
 
@@ -12,13 +20,9 @@ pthread_mutex_t buffer_lock;
 int total_num_msg = 0;
 int listen_fd;
 
-struct user_node {
-    char name[64];
-    int user_fd;
-    struct user_node *next;
-};
+struct userlist users;
 
-struct user_node *head = NULL;
+int DEBUG_OUT = 1;
 
 void sigint_handler(int sig) {
     printf("shutting down server\n");
@@ -88,37 +92,83 @@ void *process_client(void *clientfd_ptr) {
 
         pthread_mutex_lock(&buffer_lock);
 
-        petr_header b;
+        if (DEBUG_OUT)
+            printf("current thread: %lu\n", pthread_self());
+
         petr_header r;
-        rd_msgheader(client_fd, &b);
-        if (b.msg_len < 0) {
+        petr_header s;
+
+        rd_msgheader(client_fd, &r);
+        if (r.msg_len < 0) {
             printf("Error reading message\n");
             break;
         }
 
         bzero(buffer, BUFFER_SIZE);
-        received_size = read(client_fd, buffer, b.msg_len);
-        if (received_size < 0 || received_size != b.msg_len) {
+        received_size = read(client_fd, buffer, r.msg_len);
+        if (received_size < 0 || received_size != r.msg_len) {
             printf("Invalid size\n");
             break;
         }
 
-        switch (b.msg_type) {
+        // TODO: restructure. login should open client thread,
+        // then read messages to create jobs
+
+        switch (r.msg_type) {
         case LOGIN:
+        {
             printf("Login requested for user %s\n", buffer);
-            r.msg_len = 0;
-            r.msg_type = OK;
+
+            struct node *c;
+            int found = 0;
+            for (c = users.head; c != NULL; c = c->next) {
+                if (strcmp(buffer, c->username) == 0) { // TODO: safety?
+                    found = 1;
+                    break;
+                }
+            }
+
+            if (found) {
+                s.msg_type = EUSREXISTS;
+            } else {
+                // create new user
+                if (DEBUG_OUT)
+                    printf("Creating new user with name %s (length %d)\n", buffer, r.msg_len);
+
+                insertFront(&users, buffer, client_fd);
+               
+                s.msg_type = OK;
+            }
+            s.msg_len = 0;
             break;
+        }
         case LOGOUT:
-            // TODO: print username
-            printf("Logout requested\n");
-            r.msg_len = 0;
-            r.msg_type = OK;
+        {
+            if (DEBUG_OUT) {
+                printf("Logout requested for FD %d...\n", client_fd);
+                //printList(&users);
+            }
+
+            int ui = getIndexByFD(&users, client_fd);
+            if (ui >= 0) {
+                if (DEBUG_OUT) {
+                    node_t *c = getNode(&users, ui);
+                    printf("Removing user %s (FD: %d)...\n", c->username, c->user_fd);
+                }
+                removeByIndex(&users, ui);
+                s.msg_len = 0;
+                s.msg_type = OK;
+             } else {
+                printf("Error: user not found to logout!");
+                s.msg_len = 0;
+                s.msg_type = ESERV;
+            }
             break;
+        }
         default:
             printf("WATAFAK!!!!!!\n");
-            r.msg_len = 0;
-            r.msg_type = ESERV;
+            s.msg_len = 0;
+            s.msg_type = ESERV;
         }
 
         total_num_msg++;
@@ -127,7 +177,7 @@ void *process_client(void *clientfd_ptr) {
         printf("Total number of received messages: %d\n", total_num_msg);
 
         // send response to client
-        int ret = wr_msg(client_fd, &r, buffer);
+        int ret = wr_msg(client_fd, &s, buffer);
         pthread_mutex_unlock(&buffer_lock);
 
         if (ret < 0) {
@@ -135,9 +185,13 @@ void *process_client(void *clientfd_ptr) {
             break;
         }
         printf("Send response to client: %s\n", buffer);
+
+        // close connection when user logs out or tries to login as an existing user
+        if (r.msg_type == LOGOUT || s.msg_type == EUSREXISTS) 
+            break;
     }
     // Close the socket at the end
-    printf("Close current client connection\n");
+    printf("Closing current client connection\n");
     close(client_fd);
     return NULL;
 }
@@ -174,25 +228,38 @@ void run_server(int server_port) {
 int main(int argc, char *argv[]) {
     int opt;
 
+    const char usage[] = "%s [-h] [-j N] PORT_NUMBER AUDIT_FILENAME\n";
     unsigned int port = 0;
-    while ((opt = getopt(argc, argv, "p:")) != -1) {
+    unsigned int jthreads = 2;
+    char audit_log[32];
+    while ((opt = getopt(argc, argv, "hj:")) != -1) {
         switch (opt) {
-        case 'p':
-            port = atoi(optarg);
+        case 'h':
+            printf(usage, argv[0]);
+            printf("\n-h\t\tDisplays this help menu, and returns EXIT_SUCCESS.\n");
+            printf("-j N\t\tNumber of job threads. Default to 2.\n");
+            printf("AUDIT_FILENAME\tFile to output Audit Log messages to.\n");
+            printf("PORT_NUMBER\tPort number to listen on.\n");
+            exit(EXIT_SUCCESS);
+        case 'j':
+            jthreads = atoi(optarg);
             break;
         default: /* '?' */
-            fprintf(stderr, "Server Application Usage: %s -p <port_number>\n",
-                    argv[0]);
+            fprintf(stderr, usage, argv[0]);
             exit(EXIT_FAILURE);
         }
     }
 
-    if (port == 0) {
-        fprintf(stderr, "ERROR: Port number for server to listen is not given\n");
-        fprintf(stderr, "Server Application Usage: %s -p <port_number>\n",
-                argv[0]);
+    if (optind >= argc - 1) {
+        fprintf(stderr, usage, argv[0]);
         exit(EXIT_FAILURE);
+    } else {
+        port = atoi(argv[optind]);
+        strcpy(audit_log, argv[optind+1]); // TODO: safety
     }
+
+    printf("received arguments\njob threads: %d | port: %d | audit log: %s\n", 
+            jthreads, port, audit_log);
 
     run_server(port);
 
