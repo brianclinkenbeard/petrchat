@@ -126,13 +126,11 @@ void removeByIndex(userlist_t* list, int index) {
 }
 
 void printList(userlist_t *list) {
-    printf("list size: %d\n", list->length);
     user_t *c = list->head;
     for (int i = 0; i < list->length; ++i) {
-        printf("%d | username: %s | fd: %d\n", i, c->username, c->user_fd);
+        printf("%s\n", c->username);
         c = c->next;
     }
-    printf("fini!!!\n");
 }
 
 void deleteList(userlist_t* list) {
@@ -157,7 +155,7 @@ int getIndexByFD(userlist_t* list, int fd)
     return -1;
 }
 
-user_t* getNode(userlist_t* list, int index)
+user_t* getUser(userlist_t* list, int index)
 {
     if (index >= list->length)
         return NULL;
@@ -184,7 +182,7 @@ int nameExists(userlist_t *list, char *name)
 }
 
 // rooms
-void addRoomFront(roomlist_t* list, char* name) {
+void addRoomFront(roomlist_t* list, char* name, char* owner) {
     if (list->length == 0)
         list->head = NULL;
 
@@ -193,6 +191,7 @@ void addRoomFront(roomlist_t* list, char* name) {
     new_node = malloc(sizeof(room_t));
 
     strcpy(new_node->roomname, name);
+    strcpy(new_node->owner, owner);
     new_node->userlist = NULL;
 
     new_node->next = *head;
@@ -200,9 +199,9 @@ void addRoomFront(roomlist_t* list, char* name) {
     list->length++; 
 }
 
-void addRoom(roomlist_t* list, char* name) {
+void addRoom(roomlist_t* list, char* name, char* owner) {
     if (list->length == 0) {
-        addRoomFront(list, name);
+        addRoomFront(list, name, owner);
         return;
     }
 
@@ -214,6 +213,7 @@ void addRoom(roomlist_t* list, char* name) {
 
     current->next = malloc(sizeof(room_t));
     strcpy(current->next->roomname, name);
+    strcpy(current->next->owner, owner);
     current->next->userlist = NULL;
     current->next->next = NULL;
     list->length++;
@@ -236,68 +236,39 @@ room_t* getRoom(roomlist_t* list, char *name) {
 }
 
 int removeRoom(roomlist_t* list, char* name) {
-    room_t** head = &(list->head);
-    room_t* current = *head;
     room_t* prev = NULL;
+    
+    for (room_t* c = list->head; c != NULL; c = c->next) {
+        if (c->roomname == name) {
+            if (c == list->head) {
+                list->head = c->next;
+                deleteList(c->userlist);
+                free(c);
 
-    for (int i = 0; i < list->length; ++i) {
-        if (strcmp(name, current->roomname)) {
-            if (i == 0) {
-                room_t* temp = *head;
-                *head = current->next;
-                free(temp);
-                
                 list->length--;
                 return 0;
             } else {
-                prev->next = current->next;
-                free(current);
+                prev->next = c->next;
+                deleteList(c->userlist);
+                free(c);
 
                 list->length--;
                 return 0;
             }
         }
-        prev = current;
-        current = current->next;
+        prev = c; // before moving c to next
     }
+
     return -1;
 }
 
 int removeUserFromRoom(roomlist_t* list, room_t* room, user_t u) {
-    room_t** head = &(list->head);
-    room_t* current = *head;
-    room_t* prev = NULL;
-
     int index = getIndexByFD(room->userlist, u.user_fd);
     
-    if (index < 0)
+    if (index < 0) {
         return -1;
-
-    if (index == 0) {
-		room_t* temp = *head;
-        *head = current->next;
-        free(temp);
-        
-		list->length--;
-        
-        // if last user in room, also close remove the room
-        if (list->length == 0) {
-            removeRoom(list, room->roomname);
-            return 1;
-        }
-
-		return 0;
+    } else {
+        removeByIndex(room->userlist, index);
+        return 0;
     }
-
-    int i = 0;
-    while (i++ != index) {
-        prev = current;
-        current = current->next;
-    }
-
-    prev->next = current->next;
-    free(current);
-
-    list->length--;
-    return 0;
 }

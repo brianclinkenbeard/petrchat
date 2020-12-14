@@ -69,11 +69,12 @@ void deleteList(userlist_t* list);
 void printList(userlist_t* list);
 
 int getIndexByFD(userlist_t* list, int fd);
-user_t* getNode(userlist_t* list, int index);
+user_t* getUser(userlist_t* list, int index);
 int nameExists(userlist_t* list, char* name);
 
 typedef struct room_node {
     char roomname[STR_MAX];
+    char owner[STR_MAX];
     userlist_t *userlist;
     struct room_node* next;
 } room_t;
@@ -83,8 +84,8 @@ typedef struct room_list {
     int length;
 } roomlist_t;
 
-void addRoomFront(roomlist_t*, char*);
-void addRoom(roomlist_t*, char*);
+void addRoomFront(roomlist_t*, char*, char*);
+void addRoom(roomlist_t*, char*, char*);
 void addUserToRoom(room_t*, user_t);
 room_t* getRoom(roomlist_t*, char*);
 int removeRoom(roomlist_t*, char*);
