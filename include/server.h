@@ -15,6 +15,6 @@
 #define BUFFER_SIZE 1024
 #define SA struct sockaddr
 
-void run_server(int server_port);
+void run_server(int server_port, int j_threads);
 
 #endif

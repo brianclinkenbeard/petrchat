@@ -2,6 +2,7 @@
 // Member: Brian Clinkenbeard
 
 #include "server.h"
+#include "linkedList.h"
 #include "protocol.h"
 #include <bits/getopt_core.h>
 #include <pthread.h>
@@ -9,8 +10,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
-#include "linkedList.h"
+#include "sbuf.h"
 
 const char exit_str[] = "exit";
 
@@ -20,14 +22,119 @@ pthread_mutex_t buffer_lock;
 int total_num_msg = 0;
 int listen_fd;
 
-struct userlist users;
+// userlist
+userlist_t users;
 
-int DEBUG_OUT = 1;
+// rooms
+#define MAX_ROOMS 10
+roomlist_t rooms;
+
+// jobs
+#define MAX_JOBS 16
+sbuf_t j_buf;
+
+const int DEBUG_OUT = 1;
 
 void sigint_handler(int sig) {
     printf("shutting down server\n");
+
+    deleteList(&users); // free userlist
+    sbuf_deinit(&j_buf);
+    // TODO: client fds + zombies?
     close(listen_fd);
     exit(0);
+}
+
+void *process_job() {
+    printf("Job thread started: %lu\n", pthread_self());
+    while (1) {
+        j_msg m = sbuf_remove(&j_buf);
+        printf("removed job from buffer on thread %lu\n", pthread_self());
+        petr_header r;
+        bzero(buffer, BUFFER_SIZE);
+        switch (m.header.msg_type) {
+        case RMCREATE:
+        {
+            printf("creating room\n");
+            if (getRoom(&rooms, m.msg)) {
+                printf("room exists!!\n");
+                r.msg_type = ERMEXISTS;
+                //r.msg_len = 0;
+            } else {
+                addRoom(&rooms, m.msg);
+                addUserToRoom(getRoom(&rooms, m.msg), m.user);
+                r.msg_type = OK;
+                //r.msg_len = 0;
+            }
+            break;
+        }
+        case RMLIST:
+        {
+           if (rooms.head == NULL) {
+                printf("No rooms\n");
+            } else {
+                printf("Creating roomlist\n");
+                for (room_t *c = rooms.head; c != NULL; c = c->next) {
+                    strcat(buffer, c->roomname);
+                    strcat(buffer, ":");
+                    for (user_t *u = c->userlist->head; u != NULL; u = u->next) {
+                        strcat(buffer, u->username);
+                        if (u->next)
+                            strcat(buffer, ",");
+                    }
+                    if (c->next)
+                        strcat(buffer, "\r\n");
+                }
+            }
+            r.msg_type = RMLIST;
+            //r.msg_len = strlen(buffer);
+            printf("room list length: %d\n", r.msg_len);
+            break;
+        }
+        case RMJOIN:
+        {
+            room_t *j_room = getRoom(&rooms, m.msg);
+            if (j_room) {
+                printf("adding user %s to room %s\n", m.user.username, m.msg);
+                addUserToRoom(j_room, m.user);
+                r.msg_type = OK;
+                //r.msg_len = 0;
+            } else {
+                printf("room %s requested by %s not found\n", m.msg, m.user.username);
+                r.msg_type = ERMNOTFOUND;
+                //r.msg_len = 0;
+            }
+            break;
+        }
+        case RMLEAVE:
+        {
+            // TODO: "creator" business...
+            room_t *l_room = getRoom(&rooms, m.msg);
+            if (l_room) {
+                printf("removing user from room\n");
+                removeUserFromRoom(&rooms, l_room, m.user);
+                r.msg_type = OK;
+                //r.msg_len = 0;
+            } else {
+                printf("room doesn't exist\n");
+                r.msg_type = ERMNOTFOUND;
+                //r.msg_len = 0;
+            }
+            break;
+        }
+        default:
+            printf("WATAFAK!!!\n");
+            r.msg_type = ESERV;
+        }
+        r.msg_len = strlen(buffer);
+        if (r.msg_len > 0)
+            r.msg_len++; // include the null terminator
+
+        printf("responding with buffer [%s] (length %d)\n", buffer, r.msg_len);
+        wr_msg(m.user.user_fd, &r, buffer);
+    }
+
+    return NULL;
 }
 
 int server_init(int server_port) {
@@ -93,13 +200,14 @@ void *process_client(void *clientfd_ptr) {
         pthread_mutex_lock(&buffer_lock);
 
         if (DEBUG_OUT)
-            printf("Thread ID: %lu\n", pthread_self());
+            printf("Client thread: %lu\n", pthread_self());
 
         // read header
         petr_header r, s;
         rd_msgheader(client_fd, &r);
         if (r.msg_len < 0) {
             printf("Error reading message\n");
+            pthread_mutex_unlock(&buffer_lock);
             break;
         }
         
@@ -108,15 +216,14 @@ void *process_client(void *clientfd_ptr) {
         received_size = read(client_fd, buffer, r.msg_len);
         if (received_size < 0 || received_size != r.msg_len) {
             printf("Invalid size\n");
+            pthread_mutex_unlock(&buffer_lock);
             break;
         }
 
-        // TODO: restructure. create jobs based on headers
-        switch (r.msg_type) {
-        case LOGOUT:
-        {
+        if (r.msg_type == LOGOUT) {
+            // TODO: send logout job to remove from all roomlists
             int ui = getIndexByFD(&users, client_fd);
-            node_t *c = getNode(&users, ui);
+            user_t *c = getNode(&users, ui);
             printf("Logging out user %s\n", c->username);
             if (ui >= 0) {
                 removeByIndex(&users, ui); // remove user
@@ -128,13 +235,29 @@ void *process_client(void *clientfd_ptr) {
                 s.msg_type = ESERV;
             }
             s.msg_len = 0;
-            break;
+
+            // send response to client
+            int ret = wr_msg(client_fd, &s, buffer);
+            pthread_mutex_unlock(&buffer_lock);
+
+            if (ret < 0) {
+                printf("Sending failed\n");
+                break;
+            }
+            //printf("Send response to client: %s\n", buffer);
+
+            // close connection when user logs out or tries to login as an existing user
+            if (r.msg_type == LOGOUT)
+                break;
+        } else {
+            printf("Sending job to job buffer\n");
+            j_msg n_job; // new job
+            n_job.header = r; // forward header
+            n_job.user = *getNode(&users, getIndexByFD(&users, client_fd)); // TODO: totally unsafe
+            strcpy(n_job.msg, buffer);
+            sbuf_insert(&j_buf, n_job);
         }
-        default:
-            printf("WATAFAK!!!!!!\n");
-            s.msg_len = 0;
-            s.msg_type = ESERV;
-        }
+
         /*
         total_num_msg++;
         // print buffer which contains the client contents
@@ -142,19 +265,7 @@ void *process_client(void *clientfd_ptr) {
         printf("Total number of received messages: %d\n", total_num_msg);
         */
 
-        // send response to client
-        int ret = wr_msg(client_fd, &s, buffer);
         pthread_mutex_unlock(&buffer_lock);
-
-        if (ret < 0) {
-            printf("Sending failed\n");
-            break;
-        }
-        //printf("Send response to client: %s\n", buffer);
-
-        // close connection when user logs out or tries to login as an existing user
-        if (r.msg_type == LOGOUT)
-            break;
     }
     // Close the socket at the end
     printf("Closing client (FD: %d)\n", client_fd);
@@ -162,16 +273,28 @@ void *process_client(void *clientfd_ptr) {
     return NULL;
 }
 
-void run_server(int server_port) {
+void run_server(int server_port, int j_threads) {
     listen_fd = server_init(server_port); // Initiate server and start listening on specified port
     int client_fd;
     struct sockaddr_in client_addr;
     int client_addr_len = sizeof(client_addr);
 
-    pthread_t tid;
-
+    // handle interrupt
     if (signal(SIGINT, sigint_handler) == SIG_ERR)
         printf("signal handler processing error\n");
+
+    // TODO: initialize userlist? necessary? 
+
+    // initialize job queue
+    sbuf_init(&j_buf, MAX_JOBS);
+
+    // start job threads
+    for (int i = 0; i < j_threads; ++i) {
+        pthread_t jtid;
+        pthread_create(&jtid, NULL, process_job, NULL);
+    }
+
+    pthread_t tid;
 
     while (1) {
         // Wait and Accept the connection from client
@@ -233,7 +356,7 @@ int main(int argc, char *argv[]) {
 
     const char usage[] = "%s [-h] [-j N] PORT_NUMBER AUDIT_FILENAME\n";
     unsigned int port = 0;
-    unsigned int jthreads = 2;
+    unsigned int j_threads = 2;
     char audit_log[32];
     while ((opt = getopt(argc, argv, "hj:")) != -1) {
         switch (opt) {
@@ -245,7 +368,7 @@ int main(int argc, char *argv[]) {
             printf("PORT_NUMBER\tPort number to listen on.\n");
             exit(EXIT_SUCCESS);
         case 'j':
-            jthreads = atoi(optarg);
+            j_threads = atoi(optarg);
             break;
         default: /* '?' */
             fprintf(stderr, usage, argv[0]);
@@ -262,9 +385,9 @@ int main(int argc, char *argv[]) {
     }
 
     if (DEBUG_OUT)
-        printf("Job threads: %d | Port: %d | Audit log: %s\n", jthreads, port, audit_log);
+        printf("Job threads: %d | Port: %d | Audit log: %s\n", j_threads, port, audit_log);
 
-    run_server(port);
+    run_server(port, j_threads);
 
     return 0;
 }
