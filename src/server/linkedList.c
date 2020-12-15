@@ -192,9 +192,6 @@ int nameExists(userlist_t *list, char *name)
 }
 
 void addUserToRoom(room_t* room, user_t user) {
-    if (room->userlist == NULL)
-        room->userlist = malloc(sizeof(userlist_t));
-
     addUser(room->userlist, user.username, user.user_fd);
 }
 
@@ -209,7 +206,11 @@ void addRoomFront(roomlist_t* list, char* name, user_t owner) {
 
     strcpy(new_node->roomname, name);
     strcpy(new_node->owner, owner.username);
-    new_node->userlist = NULL;
+
+    // create new userlist
+    new_node->userlist = malloc(sizeof(userlist_t));
+    new_node->userlist->head = NULL;
+    new_node->userlist->length = 0;
     addUserToRoom(new_node, owner); // add owner to room
 
     new_node->next = *head;
@@ -232,9 +233,13 @@ void addRoom(roomlist_t* list, char* name, user_t owner) {
     current->next = malloc(sizeof(room_t));
     strcpy(current->next->roomname, name);
     strcpy(current->next->owner, owner.username);
-    current->next->userlist = NULL;
+    // create new userlist
+    current->next->userlist = malloc(sizeof(userlist_t));
+    current->next->userlist->head = NULL;
+    current->next->userlist->length = 0;
     addUserToRoom(current->next, owner); // add owner to room
     current->next->next = NULL;
+
     list->length++;
 }
 

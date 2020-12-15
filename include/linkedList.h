@@ -76,7 +76,7 @@ int nameExists(userlist_t* list, char* name);
 typedef struct room_node {
     char roomname[STR_MAX];
     char owner[STR_MAX];
-    userlist_t *userlist;
+    userlist_t* userlist;
     struct room_node* next;
 } room_t;
 

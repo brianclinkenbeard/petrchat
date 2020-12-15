@@ -27,11 +27,11 @@ int total_num_msg = 0;
 int listen_fd;
 
 // userlist
-userlist_t users;
+userlist_t users = { .head = NULL, .length = 0 };
 
 // rooms
 #define MAX_ROOMS 10
-roomlist_t rooms;
+roomlist_t rooms = { .head = NULL, .length = 0};
 
 // jobs
 #define MAX_JOBS 16
