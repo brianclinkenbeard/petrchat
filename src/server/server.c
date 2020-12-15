@@ -23,8 +23,8 @@ pthread_mutex_t buffer_lock;
 //pthread_mutex_t rooms_lock;
 //pthread_mutex_t rooms_lock;
 
-int total_num_msg = 0;
 int listen_fd;
+FILE *a_log; // audit log
 
 // userlist
 userlist_t users = { .head = NULL, .length = 0 };
@@ -37,13 +37,9 @@ roomlist_t rooms = { .head = NULL, .length = 0};
 #define MAX_JOBS 16
 sbuf_t j_buf;
 
-// TODO: switch to proper debugging
-const int DEBUG_OUT = 1;
-
 void sigint_handler(int sig) {
-    printf("shutting down server\n");
+    fprintf(a_log, "Shutting down server\n");
 
-    // free job buffer, room list, and user list
     sbuf_deinit(&j_buf);
     deleteRoomList(&rooms);
     // close all client fds
@@ -52,40 +48,40 @@ void sigint_handler(int sig) {
     }
     deleteUserList(&users);
 
-    // TODO: client fds + zombies?
     close(listen_fd);
     exit(0);
 }
-
 
 // locks rooms
 void roomCreate(char* room, user_t user) {
     petr_header r = { .msg_len = 0 };
 
-    printf("creating room\n");
+    fprintf(a_log, "Creating room %s\n", room);
     if (getRoom(&rooms, room)) {
-        printf("room already exists!\n");
+        fprintf(a_log, "Room already exists!\n");
         r.msg_type = ERMEXISTS;
     } else {
-        printf("adding room\n");
         addRoom(&rooms, room, user); // adds owner to room as well
+        fprintf(a_log, "Successfully added room\n");
         r.msg_type = OK;
     }
 
     wr_msg(user.user_fd, &r, "");
 }
+
 void roomDelete(char* room, user_t user, bool write) {
+    fprintf(a_log, "Requesting deletion of room %s by %s\n", room, user.username);
     petr_header r = { .msg_len = 0 };
 
     room_t *r_room = getRoom(&rooms, room);
     if (r_room) {
         // must be owner
         if (strcmp(user.username, r_room->owner) == 0) {
-            printf("deleting room %s\n", r_room->roomname);
+            fprintf(a_log, "Deleting room %s...\n", r_room->roomname);
             // notify other users of deletion
             for (user_t *u = r_room->userlist->head; u != NULL; u = u->next) {
                 if (strcmp(u->username, r_room->owner) != 0) {
-                    printf("notifying %s of %s closing\n", u->username, r_room->roomname);
+                    fprintf(a_log, "Notifying %s of %s closing\n", u->username, r_room->roomname);
                     petr_header notify = { .msg_type = RMCLOSED, .msg_len = strlen(r_room->roomname) + 1 };
                     wr_msg(u->user_fd, &notify, r_room->roomname);
                 } 
@@ -94,11 +90,11 @@ void roomDelete(char* room, user_t user, bool write) {
 
             r.msg_type = OK;
         } else {
-            printf("room not owned by user\n");
+            fprintf(a_log, "Room not owned by user\n");
             r.msg_type = ERMDENIED;
         }
     } else {
-        printf("room %s not found to delete\n", r_room->roomname);
+        fprintf(a_log, "Room %s not found\n", r_room->roomname);
         r.msg_type = ERMNOTFOUND;
     }
 
@@ -108,10 +104,11 @@ void roomDelete(char* room, user_t user, bool write) {
 
 // locks buffer and room (access)
 void roomList(user_t user) {
+    fprintf(a_log, "Roomlist requested by %s\n", user.username);
+
     if (rooms.head == NULL) {
-        printf("no rooms\n");
+        fprintf(a_log, "No rooms\n");
     } else {
-        printf("creating roomlist\n");
         for (room_t *c = rooms.head; c != NULL; c = c->next) {
             strcat(buffer, c->roomname);
             strcat(buffer, ": ");
@@ -122,6 +119,7 @@ void roomList(user_t user) {
             }
             strcat(buffer, "\n");
         }
+        fprintf(a_log, "Created roomlist\n");
     }
     // add null terminator if buffer is not empty
     petr_header r = { .msg_type = RMLIST, .msg_len = strlen(buffer) ? strlen(buffer) + 1 : 0 }; 
@@ -130,14 +128,15 @@ void roomList(user_t user) {
 }
 
 void roomJoin(char *room, user_t user) {
+    fprintf(a_log, "User %s request to join room %s\n", user.username, room);
     petr_header r = { .msg_len = 0 };
     room_t *j_room = getRoom(&rooms, room);
     if (j_room) {
-        printf("adding user %s to room %s\n", user.username, room);
         addUserToRoom(j_room, user);
+        fprintf(a_log, "Added user %s to room %s\n", user.username, room);
         r.msg_type = OK;
     } else {
-        printf("room %s requested by %s not found\n", room, user.username);
+        fprintf(a_log, "Room %s requested by %s not found\n", room, user.username);
         r.msg_type = ERMNOTFOUND;
     }
 
@@ -145,19 +144,20 @@ void roomJoin(char *room, user_t user) {
 }
 
 void roomLeave(char* room, user_t user) {
+    fprintf(a_log, "User %s requesting to leave room %s\n", user.username, room);
     petr_header r = { .msg_len = 0 };
     room_t *l_room = getRoom(&rooms, room);
     if (l_room) {
         if (strcmp(l_room->owner, user.username) == 0) {
-            printf("owner cannot leave room, must delete\n");
+            fprintf(a_log, "Owner cannot leave room, must delete\n");
             r.msg_type = ERMDENIED;
         } else {
-            printf("removing user from room\n");
             removeUserFromRoom(&rooms, l_room, user); // if user is not in room, nothing happens
+            fprintf(a_log, "Removed user from room\n");
             r.msg_type = OK;
         }
     } else {
-        printf("room doesn't exist\n");
+        fprintf(a_log, "Room doesn't exist\n");
         r.msg_type = ERMNOTFOUND;
     }
  
@@ -169,14 +169,11 @@ void roomSend(char *user_str, user_t user) {
     petr_header r = { .msg_len = 0 };
 
     char *room = strtok(user_str, "\r");
-    printf("room: %s\n", room);
     room_t *s_room = getRoom(&rooms, room);
     if (s_room) {
         if (getIndexByFD(s_room->userlist, user.user_fd) >= 0) {
-            printf("sending room message\n");
             char *message = strtok(NULL, "\r");
             message++; // skip newline
-            printf("message: %s\n", message);
 
             // write response to buffer
             strcat(buffer, s_room->roomname);
@@ -185,10 +182,12 @@ void roomSend(char *user_str, user_t user) {
             strcat(buffer, "\r\n");
             strcat(buffer, message);
 
+            fprintf(a_log, "Room message %s from %s in %s\n", message, user.username, room);
+
             // send to all users
             for (user_t *u = s_room->userlist->head; u != NULL; u = u->next) {
                 if (strcmp(u->username, user.username) != 0) {
-                    printf("sending message %s to %s\n", message, u->username);
+                    fprintf(a_log, "Sending message to %s\n", message);
                     petr_header send = { .msg_type = RMRECV, .msg_len = strlen(buffer) + 1 };
                     wr_msg(u->user_fd, &send, buffer);
                 }
@@ -196,9 +195,11 @@ void roomSend(char *user_str, user_t user) {
             bzero(buffer, BUFFER_SIZE); // zero buffer after sending to other users
             r.msg_type = OK;
         } else {
+            fprintf(a_log, "User %s not in room %s\n", user.username, room);
             r.msg_type = ERMDENIED;
         }
     } else {
+        fprintf(a_log, "Room %s not found\n", room);
         r.msg_type = ERMNOTFOUND;
     }
 
@@ -208,9 +209,8 @@ void roomSend(char *user_str, user_t user) {
 // locks buffer, userlist
 void userSend(char *user_str, user_t user) {
     petr_header r = { .msg_len = 0 };
-    printf("sending user message\n");
+
     char *usr_str = strtok(user_str, "\r");
-    printf("user: %s\n", usr_str);
     user_t *s_user = getUserByName(&users, usr_str);
     if (s_user) {
         char *message = strtok(NULL, "\r");
@@ -222,13 +222,14 @@ void userSend(char *user_str, user_t user) {
         strcat(buffer, message);
 
         // send message
-        printf("%s sending %s message %s", user.username, s_user->username, message);
         petr_header send = { .msg_type = USRRECV, .msg_len = strlen(buffer) + 1 };
         wr_msg(s_user->user_fd, &send, buffer);
+        fprintf(a_log, "User %s sent user %s message %s\n", user.username, s_user->username, message);
 
         bzero(buffer, BUFFER_SIZE); // zero buffer after sending
         r.msg_type = OK;
     } else {
+        fprintf(a_log, "User %s requested by user %s not found\n", usr_str, user.username);
         r.msg_type = EUSRNOTFOUND;
     }
 
@@ -237,21 +238,25 @@ void userSend(char *user_str, user_t user) {
 
 // locks buffer and userlist
 void userList(user_t user) {
+    fprintf(a_log, "User %s\n requested userlist\n", user.username);
+
     for (user_t *u = users.head; u != NULL; u = u->next) {
         if (strcmp(u->username, user.username) != 0) { // not requesting user
             strcat(buffer, u->username);
             strcat(buffer, "\n");
         }
     }
+    fprintf(a_log, "Created userlist\n");
 
     petr_header r = { .msg_type = USRLIST, .msg_len = strlen(buffer) ? strlen(buffer) + 1 : 0 }; 
     wr_msg(user.user_fd, &r, buffer);
-    // TODO: zero buffer
+
+    bzero(buffer, BUFFER_SIZE); // zero buffer after sending
 }
 
 void logout(user_t user) {
     // TODO: send logout job to remove from all roomlists
-    printf("Logging out user %s\n", user.username);
+    fprintf(a_log, "Logging out user %s\n", user.username);
     // delete or remove from rooms
     for (room_t *r = rooms.head; r != NULL; r = r->next) {
         if (strcmp(user.username, r->owner) == 0)
@@ -269,12 +274,12 @@ void logout(user_t user) {
 
 
 void *process_job() {
-    debug("job thread started: %lu\n", pthread_self());
+    fprintf(a_log, "Job thread started: %lu\n", pthread_self());
 
     while (1) {
         // wait for job
         j_msg m = sbuf_remove(&j_buf);
-        printf("removed job from buffer on thread %lu\n", pthread_self());
+        fprintf(a_log, "Removed job from buffer on thread %lu\n", pthread_self());
 
         pthread_mutex_lock(&buffer_lock);
         bzero(buffer, BUFFER_SIZE); // start with empty buffer
@@ -304,7 +309,7 @@ void *process_job() {
             userList(m.user);
             break;
         default:
-            printf("WATAFAK!!!\n");
+            fprintf(a_log, "OH NO!!!\n");
             petr_header r = { .msg_type = ESERV, .msg_len = 0 };
             wr_msg(m.user.user_fd, &r, "");
         }
@@ -325,7 +330,7 @@ int server_init(int server_port) {
         printf("socket creation failed...\n");
         exit(EXIT_FAILURE);
     } else
-        printf("Socket successfully created\n");
+        fprintf(a_log, "Socket successfully created\n");
 
     bzero(&servaddr, sizeof(servaddr));
 
@@ -342,24 +347,24 @@ int server_init(int server_port) {
 
     // Binding newly created socket to given IP and verification
     if ((bind(sockfd, (SA *)&servaddr, sizeof(servaddr))) != 0) {
-        printf("socket bind failed\n");
+        fprintf(a_log, "socket bind failed\n");
         exit(EXIT_FAILURE);
     } else
-        printf("Socket successfully binded\n");
+        fprintf(a_log, "Socket successfully binded\n");
 
     // Now server is ready to listen and verification
     if ((listen(sockfd, 1)) != 0) {
-        printf("Listen failed\n");
+        fprintf(a_log, "Listen failed\n");
         exit(EXIT_FAILURE);
     } else
-        printf("Server listening on port: %d.. Waiting for connection\n", server_port);
+        fprintf(a_log, "Server listening on port: %d.. Waiting for connection\n", server_port);
 
     return sockfd;
 }
 
 //Function running in thread
 void *process_client(void *clientfd_ptr) {
-    printf("Processing client\n");
+    fprintf(a_log, "Processing client\n");
     int client_fd = *(int *)clientfd_ptr;
     free(clientfd_ptr);
     int received_size;
@@ -371,20 +376,19 @@ void *process_client(void *clientfd_ptr) {
         FD_SET(client_fd, &read_fds);
         retval = select(client_fd + 1, &read_fds, NULL, NULL, NULL);
         if (retval != 1 && !FD_ISSET(client_fd, &read_fds)) {
-            printf("Error with select() function\n");
+            fprintf(a_log, "Error with select() function\n");
             break;
         }
 
         pthread_mutex_lock(&buffer_lock);
 
-        if (DEBUG_OUT)
-            printf("client thread: %lu\n", pthread_self());
+        fprintf(a_log, "Client thread: %lu\n", pthread_self());
 
         // read header
         petr_header r, s;
         rd_msgheader(client_fd, &r);
         if (r.msg_len < 0) {
-            printf("Error reading message\n");
+            fprintf(a_log, "Error reading message\n");
 
             pthread_mutex_unlock(&buffer_lock);
             break;
@@ -394,19 +398,18 @@ void *process_client(void *clientfd_ptr) {
         bzero(buffer, BUFFER_SIZE);
         received_size = read(client_fd, buffer, r.msg_len);
         if (received_size < 0 || received_size != r.msg_len) {
-            printf("Invalid size\n");
+            fprintf(a_log, "Invalid size\n");
             pthread_mutex_unlock(&buffer_lock);
             break;
         }
 
         if (r.msg_type == LOGOUT) {
-            // this sucks lol
+            // this sucks
             logout(*getUser(&users, getIndexByFD(&users, client_fd)));
 
             pthread_mutex_unlock(&buffer_lock);
             break;
         } else {
-            printf("Sending job to job buffer\n");
             j_msg n_job; // new job
             n_job.header = r; // forward header
             n_job.user = *getUser(&users, getIndexByFD(&users, client_fd)); // TODO: totally unsafe
@@ -414,11 +417,12 @@ void *process_client(void *clientfd_ptr) {
 
             pthread_mutex_unlock(&buffer_lock);
 
+            fprintf(a_log, "Inserting job to job buffer\n");
             sbuf_insert(&j_buf, n_job); // add job
         }
     }
     // Close the socket at the end
-    printf("Closing client (FD: %d)\n", client_fd);
+    fprintf(a_log, "Closing client (FD: %d)\n", client_fd);
     close(client_fd);
     return NULL;
 }
@@ -431,7 +435,7 @@ void run_server(int server_port, int j_threads) {
 
     // handle interrupt
     if (signal(SIGINT, sigint_handler) == SIG_ERR)
-        printf("signal handler processing error\n");
+        fprintf(a_log, "signal handler processing error\n");
 
     // TODO: initialize userlist? necessary? 
 
@@ -448,25 +452,24 @@ void run_server(int server_port, int j_threads) {
 
     while (1) {
         // Wait and Accept the connection from client
-        //printf("Wait for new client connection\n");
         int *client_fd = malloc(sizeof(int));
         *client_fd = accept(listen_fd, (SA *)&client_addr, (socklen_t*)&client_addr_len);
         if (*client_fd < 0) {
-            printf("server acccept failed\n");
+            fprintf(a_log, "server acccept failed\n");
             exit(EXIT_FAILURE);
         } else {
-            printf("Client connection accepted (FD %d)\n", *client_fd);
+            fprintf(a_log, "Client connection accepted (FD %d)\n", *client_fd);
 
             petr_header login, r;
             r.msg_len = 0;
 
             rd_msgheader(*client_fd, &login);
             if (login.msg_len < 0) {
-                printf("Error reading message, closing connection\n");
+                fprintf(a_log, "Error reading message, closing connection\n");
                 close(*client_fd);
                 continue;
             } else if (login.msg_len > STR_MAX) {
-                printf("Username too long, closing connection\n");
+                fprintf(a_log, "Username too long, closing connection\n");
                 close(*client_fd);
                 continue;
             }
@@ -474,16 +477,16 @@ void run_server(int server_port, int j_threads) {
             char name[STR_MAX];
             read(*client_fd, name, login.msg_len);
             if (nameExists(&users, name)) {
-                printf("Invalid login for username %s: user exists\n", name);
+                fprintf(a_log, "Invalid login for username %s: user exists\n", name);
 
                 // respond with error
                 r.msg_type = EUSREXISTS;
                 wr_msg(*client_fd, &r, "");
 
-                printf("Closing client (FD %d)\n", *client_fd);
+                fprintf(a_log, "Closing client (FD %d)\n", *client_fd);
                 close(*client_fd);
             } else {
-                printf("Login accepted for user %s\n", name);
+                fprintf(a_log, "Login accepted for user %s\n", name);
 
                 addUser(&users, name, *client_fd); // add user to userlist
 
@@ -507,7 +510,7 @@ int main(int argc, char *argv[]) {
     const char usage[] = "%s [-h] [-j N] PORT_NUMBER AUDIT_FILENAME\n";
     unsigned int port = 0;
     unsigned int j_threads = 2;
-    char audit_log[STR_MAX];
+    //char audit_log[STR_MAX];
     while ((opt = getopt(argc, argv, "hj:")) != -1) {
         switch (opt) {
         case 'h':
@@ -531,11 +534,14 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     } else {
         port = atoi(argv[optind]);
-        strcpy(audit_log, argv[optind+1]); // TODO: safety
+        a_log = fopen(argv[optind+1], "w");
+        if (a_log == NULL) {
+            fprintf(stderr, usage, argv[0]);
+            exit(EXIT_FAILURE);
+        }
     }
 
-    if (DEBUG_OUT)
-        printf("Job threads: %d | Port: %d | Audit log: %s\n", j_threads, port, audit_log);
+    fprintf(a_log, "Starting server with %d job threads on port: %d\n", j_threads, port);
 
     run_server(port, j_threads);
 

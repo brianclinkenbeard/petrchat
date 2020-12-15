@@ -9,5 +9,8 @@ valgrind.log
 lib
 bin
 
+# default audit log
+audit.log
+
 # submission file
 53finalproj_65.tar

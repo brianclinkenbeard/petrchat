@@ -32,8 +32,8 @@
 #define success(S, ...)                                                       \
     fprintf(stderr, KGRN "SUCCESS: %s:%s:%d " KNRM S, __FILE__, __FUNCTION__, \
             __LINE__, ##__VA_ARGS__)
-#define  fprintf(stderr, KMAG "ENTR: %s\n" KNRM, __FUNCTION__ );
-#define  fprintf(stderr, KMAG "EXIT: %s\n" KNRM, __FUNCTION__ );
+//#define  fprintf(stderr, KMAG "ENTR: %s\n" KNRM, __FUNCTION__ );
+//#define  fprintf(stderr, KMAG "EXIT: %s\n" KNRM, __FUNCTION__ );
 #else
 #define debug(S, ...)
 #define fatal(S, ...)                                                        \

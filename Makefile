@@ -1,5 +1,5 @@
 CC=gcc
-CFLAGS=-Iinclude -Wall -Werror -g -Wno-unused
+CFLAGS=-Iinclude -Wall -Werror -g -Wno-unused -DDEBUG
 
 CHSRC=$(shell find src/chat -name '*.c')
 SSRC=$(shell find src/server -name '*.c')
