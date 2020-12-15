@@ -133,7 +133,7 @@ void printList(userlist_t *list) {
     }
 }
 
-void deleteList(userlist_t* list) {
+void deleteUserList(userlist_t* list) {
     if (list->length == 0)
         return;
     while (list->head != NULL){
@@ -169,6 +169,16 @@ user_t* getUser(userlist_t* list, int index)
     return c;
 }
 
+user_t* getUserByName(userlist_t* list, char* name)
+{
+    for (user_t *u = list->head; u != NULL; u = u->next) {
+        if (strcmp(u->username, name) == 0) {
+            return u;
+        }
+    }
+    return NULL;
+}
+
 int nameExists(userlist_t *list, char *name)
 {
     int exists = 0;
@@ -181,8 +191,15 @@ int nameExists(userlist_t *list, char *name)
     return exists;
 }
 
+void addUserToRoom(room_t* room, user_t user) {
+    if (room->userlist == NULL)
+        room->userlist = malloc(sizeof(userlist_t));
+
+    addUser(room->userlist, user.username, user.user_fd);
+}
+
 // rooms
-void addRoomFront(roomlist_t* list, char* name, char* owner) {
+void addRoomFront(roomlist_t* list, char* name, user_t owner) {
     if (list->length == 0)
         list->head = NULL;
 
@@ -191,15 +208,16 @@ void addRoomFront(roomlist_t* list, char* name, char* owner) {
     new_node = malloc(sizeof(room_t));
 
     strcpy(new_node->roomname, name);
-    strcpy(new_node->owner, owner);
+    strcpy(new_node->owner, owner.username);
     new_node->userlist = NULL;
+    addUserToRoom(new_node, owner); // add owner to room
 
     new_node->next = *head;
     *head = new_node;
     list->length++; 
 }
 
-void addRoom(roomlist_t* list, char* name, char* owner) {
+void addRoom(roomlist_t* list, char* name, user_t owner) {
     if (list->length == 0) {
         addRoomFront(list, name, owner);
         return;
@@ -213,17 +231,11 @@ void addRoom(roomlist_t* list, char* name, char* owner) {
 
     current->next = malloc(sizeof(room_t));
     strcpy(current->next->roomname, name);
-    strcpy(current->next->owner, owner);
+    strcpy(current->next->owner, owner.username);
     current->next->userlist = NULL;
+    addUserToRoom(current->next, owner); // add owner to room
     current->next->next = NULL;
     list->length++;
-}
-
-void addUserToRoom(room_t* room, user_t user) {
-    if (room->userlist == NULL)
-        room->userlist = malloc(sizeof(userlist_t));
-
-    addUser(room->userlist, user.username, user.user_fd);
 }
 
 room_t* getRoom(roomlist_t* list, char *name) {
@@ -242,14 +254,14 @@ int removeRoom(roomlist_t* list, char* name) {
         if (c->roomname == name) {
             if (c == list->head) {
                 list->head = c->next;
-                deleteList(c->userlist);
+                deleteUserList(c->userlist);
                 free(c);
 
                 list->length--;
                 return 0;
             } else {
                 prev->next = c->next;
-                deleteList(c->userlist);
+                deleteUserList(c->userlist);
                 free(c);
 
                 list->length--;
@@ -271,4 +283,31 @@ int removeUserFromRoom(roomlist_t* list, room_t* room, user_t u) {
         removeByIndex(room->userlist, index);
         return 0;
     }
+}
+
+void removeRoomListFront(roomlist_t* list) {
+    room_t** head = &(list->head);
+    room_t* next_node = NULL;
+
+    if (list->length == 0) {
+        return;
+    }
+
+    next_node = (*head)->next;
+    list->length--;
+
+    room_t* temp = *head;
+    *head = next_node;
+    deleteUserList(temp->userlist);
+    free(temp);
+}
+
+
+void deleteRoomList(roomlist_t* list) {
+    if (list->length == 0)
+        return;
+    while (list->head != NULL){
+        removeRoomListFront(list);
+    }
+    list->length = 0;
 }

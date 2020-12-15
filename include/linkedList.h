@@ -8,7 +8,7 @@
 
 #define INT_MODE 0
 #define STR_MODE 1
-#define STR_MAX 32
+#define STR_MAX 256
 
 /*
  * Structre for each node of the linkedList
@@ -58,7 +58,7 @@ void removeByIndex(userlist_t* list, int n);
  *
  * @param list pointer to the linkedList struct
  */
-void deleteList(userlist_t* list);
+void deleteUserList(userlist_t* list);
 
 /*
  * Traverse the list printing each node in the current order.
@@ -70,6 +70,7 @@ void printList(userlist_t* list);
 
 int getIndexByFD(userlist_t* list, int fd);
 user_t* getUser(userlist_t* list, int index);
+user_t* getUserByName(userlist_t* list, char* name);
 int nameExists(userlist_t* list, char* name);
 
 typedef struct room_node {
@@ -84,11 +85,12 @@ typedef struct room_list {
     int length;
 } roomlist_t;
 
-void addRoomFront(roomlist_t*, char*, char*);
-void addRoom(roomlist_t*, char*, char*);
+void addRoomFront(roomlist_t*, char*, user_t);
+void addRoom(roomlist_t*, char*, user_t);
 void addUserToRoom(room_t*, user_t);
 room_t* getRoom(roomlist_t*, char*);
 int removeRoom(roomlist_t*, char*);
 int removeUserFromRoom(roomlist_t*, room_t*, user_t);
+void deleteRoomList(roomlist_t*);
 
 #endif

@@ -14,11 +14,14 @@
 #include <strings.h>
 #include <unistd.h>
 #include "sbuf.h"
+#include "debug.h"
 
 const char exit_str[] = "exit";
 
 char buffer[BUFFER_SIZE];
 pthread_mutex_t buffer_lock;
+//pthread_mutex_t rooms_lock;
+//pthread_mutex_t rooms_lock;
 
 int total_num_msg = 0;
 int listen_fd;
@@ -40,15 +43,40 @@ const int DEBUG_OUT = 1;
 void sigint_handler(int sig) {
     printf("shutting down server\n");
 
-    deleteList(&users); // free userlist
+    // free job buffer, room list, and user list
     sbuf_deinit(&j_buf);
+    deleteRoomList(&rooms);
+    // close all client fds
+    for (user_t *u = users.head; u != NULL; u = u->next) {
+        close(u->user_fd);
+    }
+    deleteUserList(&users);
+
     // TODO: client fds + zombies?
     close(listen_fd);
     exit(0);
 }
 
-petr_header roomDelete(char* room, user_t user) {
-    petr_header r;
+
+// locks rooms
+void roomCreate(char* room, user_t user) {
+    petr_header r = { .msg_len = 0 };
+
+    printf("creating room\n");
+    if (getRoom(&rooms, room)) {
+        printf("room already exists!\n");
+        r.msg_type = ERMEXISTS;
+    } else {
+        printf("adding room\n");
+        addRoom(&rooms, room, user); // adds owner to room as well
+        r.msg_type = OK;
+    }
+
+    wr_msg(user.user_fd, &r, "");
+}
+void roomDelete(char* room, user_t user, bool write) {
+    petr_header r = { .msg_len = 0 };
+
     room_t *r_room = getRoom(&rooms, room);
     if (r_room) {
         // must be owner
@@ -73,155 +101,214 @@ petr_header roomDelete(char* room, user_t user) {
         printf("room %s not found to delete\n", r_room->roomname);
         r.msg_type = ERMNOTFOUND;
     }
-    r.msg_len = 0;
-    return r;
+
+    if (write)
+        wr_msg(user.user_fd, &r, "");
 }
 
+// locks buffer and room (access)
+void roomList(user_t user) {
+    if (rooms.head == NULL) {
+        printf("no rooms\n");
+    } else {
+        printf("creating roomlist\n");
+        for (room_t *c = rooms.head; c != NULL; c = c->next) {
+            strcat(buffer, c->roomname);
+            strcat(buffer, ": ");
+            for (user_t *u = c->userlist->head; u != NULL; u = u->next) {
+                strcat(buffer, u->username);
+                if (u->next)
+                    strcat(buffer, ",");
+            }
+            strcat(buffer, "\n");
+        }
+    }
+    // add null terminator if buffer is not empty
+    petr_header r = { .msg_type = RMLIST, .msg_len = strlen(buffer) ? strlen(buffer) + 1 : 0 }; 
+    wr_msg(user.user_fd, &r, buffer);
+    // TODO: zero buffer
+}
+
+void roomJoin(char *room, user_t user) {
+    petr_header r = { .msg_len = 0 };
+    room_t *j_room = getRoom(&rooms, room);
+    if (j_room) {
+        printf("adding user %s to room %s\n", user.username, room);
+        addUserToRoom(j_room, user);
+        r.msg_type = OK;
+    } else {
+        printf("room %s requested by %s not found\n", room, user.username);
+        r.msg_type = ERMNOTFOUND;
+    }
+
+    wr_msg(user.user_fd, &r, "");
+}
+
+void roomLeave(char* room, user_t user) {
+    petr_header r = { .msg_len = 0 };
+    room_t *l_room = getRoom(&rooms, room);
+    if (l_room) {
+        if (strcmp(l_room->owner, user.username) == 0) {
+            printf("owner cannot leave room, must delete\n");
+            r.msg_type = ERMDENIED;
+        } else {
+            printf("removing user from room\n");
+            removeUserFromRoom(&rooms, l_room, user); // if user is not in room, nothing happens
+            r.msg_type = OK;
+        }
+    } else {
+        printf("room doesn't exist\n");
+        r.msg_type = ERMNOTFOUND;
+    }
+ 
+    wr_msg(user.user_fd, &r, "");
+}
+
+// locks buffer, users
+void roomSend(char *user_str, user_t user) {
+    petr_header r = { .msg_len = 0 };
+
+    char *room = strtok(user_str, "\r");
+    printf("room: %s\n", room);
+    room_t *s_room = getRoom(&rooms, room);
+    if (s_room) {
+        if (getIndexByFD(s_room->userlist, user.user_fd) >= 0) {
+            printf("sending room message\n");
+            char *message = strtok(NULL, "\r");
+            message++; // skip newline
+            printf("message: %s\n", message);
+
+            // write response to buffer
+            strcat(buffer, s_room->roomname);
+            strcat(buffer, "\r\n");
+            strcat(buffer, user.username);
+            strcat(buffer, "\r\n");
+            strcat(buffer, message);
+
+            // send to all users
+            for (user_t *u = s_room->userlist->head; u != NULL; u = u->next) {
+                if (strcmp(u->username, user.username) != 0) {
+                    printf("sending message %s to %s\n", message, u->username);
+                    petr_header send = { .msg_type = RMRECV, .msg_len = strlen(buffer) + 1 };
+                    wr_msg(u->user_fd, &send, buffer);
+                }
+            }
+            bzero(buffer, BUFFER_SIZE); // zero buffer after sending to other users
+            r.msg_type = OK;
+        } else {
+            r.msg_type = ERMDENIED;
+        }
+    } else {
+        r.msg_type = ERMNOTFOUND;
+    }
+
+    wr_msg(user.user_fd, &r, "");
+}
+
+// locks buffer, userlist
+void userSend(char *user_str, user_t user) {
+    petr_header r = { .msg_len = 0 };
+    printf("sending user message\n");
+    char *usr_str = strtok(user_str, "\r");
+    printf("user: %s\n", usr_str);
+    user_t *s_user = getUserByName(&users, usr_str);
+    if (s_user) {
+        char *message = strtok(NULL, "\r");
+        message++; // skip newline
+
+        // write response to buffer
+        strcat(buffer, user.username);
+        strcat(buffer, "\r\n");
+        strcat(buffer, message);
+
+        // send message
+        printf("%s sending %s message %s", user.username, s_user->username, message);
+        petr_header send = { .msg_type = USRRECV, .msg_len = strlen(buffer) + 1 };
+        wr_msg(s_user->user_fd, &send, buffer);
+
+        bzero(buffer, BUFFER_SIZE); // zero buffer after sending
+        r.msg_type = OK;
+    } else {
+        r.msg_type = EUSRNOTFOUND;
+    }
+
+    wr_msg(user.user_fd, &r, "");
+}
+
+// locks buffer and userlist
+void userList(user_t user) {
+    for (user_t *u = users.head; u != NULL; u = u->next) {
+        if (strcmp(u->username, user.username) != 0) { // not requesting user
+            strcat(buffer, u->username);
+            strcat(buffer, "\n");
+        }
+    }
+
+    petr_header r = { .msg_type = USRLIST, .msg_len = strlen(buffer) ? strlen(buffer) + 1 : 0 }; 
+    wr_msg(user.user_fd, &r, buffer);
+    // TODO: zero buffer
+}
+
+void logout(user_t user) {
+    // TODO: send logout job to remove from all roomlists
+    printf("Logging out user %s\n", user.username);
+    // delete or remove from rooms
+    for (room_t *r = rooms.head; r != NULL; r = r->next) {
+        if (strcmp(user.username, r->owner) == 0)
+            roomDelete(r->roomname, user, false);
+        else
+            removeUserFromRoom(&rooms, r, user); // checks if user exists
+    }
+    removeByIndex(&users, getIndexByFD(&users, user.user_fd)); // TODO: bad
+
+    petr_header r = { .msg_type = OK, .msg_len = 0 };
+
+    // send response to client
+    int ret = wr_msg(user.user_fd, &r, "");
+}
+
+
 void *process_job() {
-    printf("job thread started: %lu\n", pthread_self());
+    debug("job thread started: %lu\n", pthread_self());
+
     while (1) {
         // wait for job
         j_msg m = sbuf_remove(&j_buf);
-
         printf("removed job from buffer on thread %lu\n", pthread_self());
 
-        petr_header r; // response header
-
         pthread_mutex_lock(&buffer_lock);
-
-        // start with empty buffer
-        bzero(buffer, BUFFER_SIZE);
+        bzero(buffer, BUFFER_SIZE); // start with empty buffer
         switch (m.header.msg_type) {
         case RMCREATE:
-        {
-            printf("creating room\n");
-            if (getRoom(&rooms, m.msg)) {
-                printf("room exists!!\n");
-                r.msg_type = ERMEXISTS;
-                //r.msg_len = 0;
-            } else {
-                addRoom(&rooms, m.msg, m.user.username);
-                addUserToRoom(getRoom(&rooms, m.msg), m.user);
-                r.msg_type = OK;
-                //r.msg_len = 0;
-            }
+            roomCreate(m.msg, m.user);
             break;
-        }
         case RMDELETE:
-        {
-            r = roomDelete(m.msg, m.user);
+            roomDelete(m.msg, m.user, true);
             break;
-        }
         case RMLIST:
-        {
-           if (rooms.head == NULL) {
-                printf("no rooms\n");
-            } else {
-                printf("creating roomlist\n");
-                for (room_t *c = rooms.head; c != NULL; c = c->next) {
-                    strcat(buffer, c->roomname);
-                    strcat(buffer, ": ");
-                    for (user_t *u = c->userlist->head; u != NULL; u = u->next) {
-                        strcat(buffer, u->username);
-                        if (u->next)
-                            strcat(buffer, ",");
-                    }
-                    strcat(buffer, "\n");
-                }
-            }
-            r.msg_type = RMLIST;
-            //r.msg_len = strlen(buffer);
-            printf("room list length: %d\n", r.msg_len);
+            roomList(m.user);
             break;
-        }
         case RMJOIN:
-        {
-            room_t *j_room = getRoom(&rooms, m.msg);
-            if (j_room) {
-                printf("adding user %s to room %s\n", m.user.username, m.msg);
-                addUserToRoom(j_room, m.user);
-                r.msg_type = OK;
-                //r.msg_len = 0;
-            } else {
-                printf("room %s requested by %s not found\n", m.msg, m.user.username);
-                r.msg_type = ERMNOTFOUND;
-                //r.msg_len = 0;
-            }
+            roomJoin(m.msg, m.user);
             break;
-        }
         case RMLEAVE:
-        {
-            room_t *l_room = getRoom(&rooms, m.msg);
-            if (l_room) {
-                if (strcmp(l_room->owner, m.user.username) == 0) {
-                    printf("owner cannot leave room, must delete\n");
-                    r.msg_type = ERMDENIED;
-                } else {
-                    printf("removing user from room\n");
-                    removeUserFromRoom(&rooms, l_room, m.user); // if user is not in room, nothing happens
-                    r.msg_type = OK;
-                }
-            } else {
-                printf("room doesn't exist\n");
-                r.msg_type = ERMNOTFOUND;
-            }
+            roomLeave(m.msg, m.user);
             break;
-        }
         case RMSEND:
-        {
-            char *room = strtok(m.msg, "\r\n"); // TODO: possible memory leaks
-            printf("token 1: %s\n", room);
-            room_t *s_room = getRoom(&rooms, room);
-            if (s_room) {
-                if (getIndexByFD(s_room->userlist, m.user.user_fd) >= 0) {
-                    printf("sending room message\n");
-                    char *message = strtok(NULL, "\r\n");
-                    printf("token 2: %s\n", message);
-                    strcat(buffer, s_room->roomname);
-                    strcat(buffer, "\r\n");
-                    strcat(buffer, m.user.username);
-                    strcat(buffer, "\r\n");
-                    strcat(buffer, message);
-                    strcat(buffer, "\r\n");
-                    for (user_t *u = s_room->userlist->head; u != NULL; u = u->next) {
-                        if (strcmp(u->username, m.user.username) != 0) {
-                            printf("sending message %s to %s\n", message, u->username);
-                            petr_header send = { .msg_type = RMRECV, .msg_len = strlen(buffer) + 1 };
-                            wr_msg(u->user_fd, &send, buffer);
-                        }
-                    }
-                    bzero(buffer, BUFFER_SIZE); // zero buffer after sending to other users
-                    r.msg_type = OK;
-                } else {
-                    r.msg_type = ERMDENIED;
-                }
-            } else {
-                r.msg_type = ERMNOTFOUND;
-            }
+            roomSend(m.msg, m.user);
             break;
-        }
+        case USRSEND:
+            userSend(m.msg, m.user);
+            break;
         case USRLIST:
-        {
-            for (user_t *u = users.head; u != NULL; u = u->next) {
-                if (strcmp(u->username, m.user.username) != 0) {
-                    strcat(buffer, u->username);
-                    strcat(buffer, "\n");
-                }
-            }
-            r.msg_type = USRLIST;
+            userList(m.user);
             break;
-        }
         default:
             printf("WATAFAK!!!\n");
-            r.msg_type = ESERV;
+            petr_header r = { .msg_type = ESERV, .msg_len = 0 };
+            wr_msg(m.user.user_fd, &r, "");
         }
-        // set response length
-        r.msg_len = strlen(buffer);
-        if (r.msg_len > 0)
-            r.msg_len++; // include the null terminator
 
-        printf("responding with buffer [%s] (length %d)\n", buffer, r.msg_len);
-        wr_msg(m.user.user_fd, &r, buffer);
         pthread_mutex_unlock(&buffer_lock);
     }
 
@@ -298,6 +385,7 @@ void *process_client(void *clientfd_ptr) {
         rd_msgheader(client_fd, &r);
         if (r.msg_len < 0) {
             printf("Error reading message\n");
+
             pthread_mutex_unlock(&buffer_lock);
             break;
         }
@@ -312,40 +400,11 @@ void *process_client(void *clientfd_ptr) {
         }
 
         if (r.msg_type == LOGOUT) {
-            // TODO: send logout job to remove from all roomlists
-            int ui = getIndexByFD(&users, client_fd);
-            user_t *c = getUser(&users, ui);
-            printf("Logging out user %s\n", c->username);
-            if (ui >= 0) {
-                // remove all rooms owned by user
-                for (room_t *r = rooms.head; r != NULL; r = r->next) {
-                    if (strcmp(c->username, r->owner) == 0) {
-                        roomDelete(r->roomname, *c);
-                    }
-                }
-                removeByIndex(&users, ui); // remove user
+            // this sucks lol
+            logout(*getUser(&users, getIndexByFD(&users, client_fd)));
 
-                s.msg_type = OK;
-             } else {
-                printf("Error: user not found to logout!");
-
-                s.msg_type = ESERV;
-            }
-            s.msg_len = 0;
-
-            // send response to client
-            int ret = wr_msg(client_fd, &s, buffer);
             pthread_mutex_unlock(&buffer_lock);
-
-            if (ret < 0) {
-                printf("Sending failed\n");
-                break;
-            }
-            //printf("Send response to client: %s\n", buffer);
-
-            // close connection when user logs out or tries to login as an existing user
-            if (r.msg_type == LOGOUT)
-                break;
+            break;
         } else {
             printf("Sending job to job buffer\n");
             j_msg n_job; // new job
@@ -357,14 +416,6 @@ void *process_client(void *clientfd_ptr) {
 
             sbuf_insert(&j_buf, n_job); // add job
         }
-
-        /*
-        total_num_msg++;
-        // print buffer which contains the client contents
-        printf("Receive message from client: %s\n", buffer);
-        printf("Total number of received messages: %d\n", total_num_msg);
-        */
-
     }
     // Close the socket at the end
     printf("Closing client (FD: %d)\n", client_fd);
@@ -404,7 +455,7 @@ void run_server(int server_port, int j_threads) {
             printf("server acccept failed\n");
             exit(EXIT_FAILURE);
         } else {
-            printf("Client connetion accepted (FD %d)\n", *client_fd);
+            printf("Client connection accepted (FD %d)\n", *client_fd);
 
             petr_header login, r;
             r.msg_len = 0;
@@ -420,7 +471,7 @@ void run_server(int server_port, int j_threads) {
                 continue;
             }
 
-            char name[32];
+            char name[STR_MAX];
             read(*client_fd, name, login.msg_len);
             if (nameExists(&users, name)) {
                 printf("Invalid login for username %s: user exists\n", name);
@@ -429,7 +480,7 @@ void run_server(int server_port, int j_threads) {
                 r.msg_type = EUSREXISTS;
                 wr_msg(*client_fd, &r, "");
 
-                printf("Closing client (FD %d)", *client_fd);
+                printf("Closing client (FD %d)\n", *client_fd);
                 close(*client_fd);
             } else {
                 printf("Login accepted for user %s\n", name);
@@ -456,7 +507,7 @@ int main(int argc, char *argv[]) {
     const char usage[] = "%s [-h] [-j N] PORT_NUMBER AUDIT_FILENAME\n";
     unsigned int port = 0;
     unsigned int j_threads = 2;
-    char audit_log[32];
+    char audit_log[STR_MAX];
     while ((opt = getopt(argc, argv, "hj:")) != -1) {
         switch (opt) {
         case 'h':
