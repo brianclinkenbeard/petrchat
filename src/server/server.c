@@ -1,7 +1,3 @@
-// GROUP 65
-// Member: Brian Clinkenbeard
-
-
 #include "server.h"
 #include "linkedList.h"
 #include "protocol.h"
